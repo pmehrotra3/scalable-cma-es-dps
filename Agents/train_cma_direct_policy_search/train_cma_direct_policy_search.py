@@ -7,10 +7,11 @@
 # Developed with assistance from:
 #   Claude  (Anthropic)  — https://www.anthropic.com
 
-import argparse, os, csv, time, psutil
+import argparse, os, csv, time, psutil, threading
 import gymnasium as gym
 from CMA_direct_policy_search import CMA_direct_policy_search
 from BaseCallback import BaseCallback
+from BufferedEnv import BufferedEnv
 
 
 # -----------------------------------------------------------------------------
@@ -21,58 +22,88 @@ class EpisodeLoggerCallback(BaseCallback):
     """
     Callback that accumulates per-episode returns and system metrics,
     then writes episode_log_run_N.csv and system_log_run_N.csv to out_dir at training end.
+    RAM is sampled every 5 seconds by a background daemon thread and averaged per episode.
     """
 
     def __init__(self, out_dir: str, run: int):
 
         # Episode log lists — index i = episode i.
-        self.episode_returns: list = []  # total undiscounted return of episode i
-        self.episode_lengths: list = []  # number of env steps in episode i
+        self.episode_returns: list = []
+        self.episode_lengths: list = []
 
         # System metric lists — index i = snapshot at end of episode i.
-        self.sys_wall_times: list = []  # elapsed wall-clock seconds since training start
-        self.sys_cpu_times:  list = []  # elapsed CPU seconds consumed by this process
-        self.sys_ram_mb:     list = []  # RSS memory in MB used by this process
-        self.sys_cpu_pct:    list = []  # CPU % since last call (non-blocking)
+        self.sys_wall_times: list = []
+        self.sys_cpu_times:  list = []
+        self.sys_ram_mb:     list = []
+        self.sys_cpu_pct:    list = []
 
         # Timing handles — set in on_training_start.
-        self.start_wall = None  # wall-clock time at training start
-        self.start_cpu  = None  # CPU time at training start
-        self.process    = None  # psutil handle for this process
+        self.start_wall = None
+        self.start_cpu  = None
+        self.process    = None
 
-        self.out_dir: str = out_dir  # directory where CSV files will be saved
-        self.run:     int = run      # run number used for output filename (e.g. run 1 -> episode_log_run_1.csv)
+        # RAM daemon state.
+        self._ram_sum    = 0.0
+        self._ram_count  = 0
+        self._ram_lock   = threading.Lock()
+        self._stop_event = threading.Event()
+
+        self.out_dir: str = out_dir
+        self.run:     int = run
+
+    def _ram_sampler_loop(self) -> None:
+        """Background daemon: samples RSS every 5 s and adds to the running sum."""
+        while not self._stop_event.wait(5.0):
+            sample = self.process.memory_info().rss / 1024 / 1024
+            with self._ram_lock:
+                self._ram_sum   += sample
+                self._ram_count += 1
 
     def on_training_start(self) -> None:
-        """Record start times and initialise the psutil process handle."""
-        self.start_wall = time.time()                   # absolute wall-clock start
-        self.start_cpu  = time.process_time()           # absolute CPU time start
-        self.process    = psutil.Process(os.getpid())   # bind psutil to this process
-        self.process.cpu_percent(interval=None)         # dummy call — discards 0.0, starts internal psutil counter
+        """Record start times, initialise psutil handle, and launch the RAM sampler thread."""
+        self.start_wall = time.time()
+        self.start_cpu  = time.process_time()
+        self.process    = psutil.Process(os.getpid())
+        self.process.cpu_percent(interval=None)
+
+        self._sampler_thread = threading.Thread(target=self._ram_sampler_loop, daemon=True)
+        self._sampler_thread.start()
 
     def on_episode_end(self, ep_return: float, ep_length: int) -> None:
         """
-        Called after every rollout. Appends episode return and system metrics snapshot to log lists.
+        Called after every rollout. Takes a final RAM snapshot, averages with daemon samples,
+        resets counters, then appends all metrics to log lists.
         """
         self.episode_returns.append(float(ep_return))
         self.episode_lengths.append(int(ep_length))
 
-        self.sys_wall_times.append(time.time() - self.start_wall)             # elapsed real time
-        self.sys_cpu_times.append(time.process_time() - self.start_cpu)       # elapsed CPU time
-        self.sys_ram_mb.append(self.process.memory_info().rss / 1024 / 1024)  # RSS in MB
-        self.sys_cpu_pct.append(self.process.cpu_percent(interval=None))      # CPU % since last call
+        self.sys_wall_times.append(time.time() - self.start_wall)
+        self.sys_cpu_times.append(time.process_time() - self.start_cpu)
+        self.sys_cpu_pct.append(self.process.cpu_percent(interval=None))
+
+        # Final snapshot + average with daemon samples, then reset for next episode.
+        final = self.process.memory_info().rss / 1024 / 1024
+        with self._ram_lock:
+            self._ram_sum   += final
+            self._ram_count += 1
+            avg_ram          = self._ram_sum / self._ram_count
+            self._ram_sum    = 0.0
+            self._ram_count  = 0
+        self.sys_ram_mb.append(avg_ram)
 
     def on_training_end(self) -> None:
-        """Write all accumulated data to episode_log_run_N.csv and system_log_run_N.csv."""
+        """Stop the RAM sampler thread, then write all accumulated data to CSV files."""
+        self._stop_event.set()
+        self._sampler_thread.join()
 
         # --- episode_log_run_N.csv ---
         episode_csv = os.path.join(self.out_dir, f"episode_log_run_{self.run}.csv")
-        with open(episode_csv, "w", newline="") as f:  # newline="" prevents double line-endings on Windows
+        with open(episode_csv, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["episode", "timestep", "reward", "length"])
             timestep = 0
             for i, (ret, length) in enumerate(zip(self.episode_returns, self.episode_lengths)):
-                timestep += length  # cumulative sum of lengths gives global timestep at episode end
+                timestep += length
                 writer.writerow([i + 1, timestep, ret, length])
 
         # --- system_log_run_N.csv ---
@@ -85,8 +116,7 @@ class EpisodeLoggerCallback(BaseCallback):
 
         print(f"Saved episode log : {episode_csv}")
         print(f"Saved system log  : {system_csv}")
-
-
+        
 # -----------------------------------------------------------------------------
 # main
 # -----------------------------------------------------------------------------
@@ -100,8 +130,8 @@ def main():
     parser.add_argument("--num-runs",        type=int, default=1,       help="Number of runs to average over (default: 1)")
     args = parser.parse_args()
 
-    # --- environment ---
-    env = gym.make(args.env_name)
+    # --- environment (wrapped with BufferedEnv to reuse obs arrays across steps) ---
+    env = BufferedEnv(gym.make(args.env_name))
 
     # --- output directory ---
     out_dir = os.path.join("..","..", "output", args.env_name, "CMA_direct_policy_search")

@@ -1,14 +1,14 @@
-# FullBlockwiseCMAnn.py
-# CMA-ES optimiser over the full parameter vector of a C++ neural network.
+# sequential_blockwise_cma_direct_policy_search.py
+# CMA-ES optimisers over the full parameter vector of a C++ neural network.
 # One CMA-ES instance per block — each block covers a contiguous group of neurons within a layer.
-# All blocks are asked for candidates, the full network is assembled and evaluated,
-# and the same fitness score is told to every block's CMA-ES instance.
+# Only one block is updated per generation in a round-robin schedule. The active block samples a
+# population of candidates; inactive blocks contribute their current distribution mean to the
+# assembled network during fitness evaluation, giving the active block a clean credit signal.
 #
 # Developed with assistance from:
 #   Claude  (Anthropic)  — https://www.anthropic.com
 
 import numpy as np
-import math
 import cma
 import nn
 from BaseCallback import BaseCallback
@@ -20,17 +20,18 @@ BLOCK_SIZE    = 1         # Default number of neurons per block
 
 
 # =============================================================================
-# FullBlockwiseCMAnn
+# sequential_blockwise_cma_direct_policy_search
 # =============================================================================
 
-class FullBlockwiseCMAnn:
+class sequential_blockwise_cma_direct_policy_search:
     """
-    CMA-ES optimiser over the full parameter vector of a C++ neural network.
+    CMA-ES optimisers over the full parameter vector of a C++ neural network.
     The parameter vector is partitioned into blocks (groups of neurons within each layer).
     Each block has its own CMA-ES instance with its own covariance matrix.
-    All blocks are asked for a population of candidates each generation.
-    The full network is assembled from one candidate per block, evaluated,
-    and the same scalar fitness is told to every block's CMA-ES.
+    Only ONE block is active per generation, in a round-robin schedule.
+    The active block samples its own population of candidates; the other blocks contribute their
+    current distribution mean (es.mean) to the assembled network during fitness evaluation.
+    After the active block's tell() call, the next block in the cycle becomes active.
     Interface mirrors SB3: model.learn(total_timesteps, callback=callback)
     """
 
@@ -54,6 +55,7 @@ class FullBlockwiseCMAnn:
         opts = {
             "CMA_diagonal": 0,
             "verbose":      -9,
+            "popsize_factor": 0.5
         }
         self.es_list = [cma.CMAEvolutionStrategy(block, SIGMA, opts)for block in init_blocks]
 
@@ -91,34 +93,46 @@ class FullBlockwiseCMAnn:
 
     def learn(self, total_timesteps: int, callback: BaseCallback | None = None):
         """
-        Runs blockwise CMA-ES until total_timesteps environment steps have been taken.
+        Runs sequential blockwise CMA-ES until total_timesteps environment steps have been taken.
 
-        Each generation:
-          1. Ask each block's CMA-ES for a population of candidate vectors.
-          2. For each candidate index i, assemble the full network by taking
-             candidate i from every block's population.
-          3. Evaluate the assembled network — one episode per candidate.
-          4. Tell the same fitness score to every block's CMA-ES.
+        Round-robin schedule — one block active per generation:
+        1. Pick the active block (round-robin through all blocks).
+        2. The active block's CMA-ES asks for a population of candidate vectors.
+        3. For each candidate, assemble the full network: that candidate for the active block,
+            plus the best-known blocks for every inactive block (or the distribution mean
+            if no best is yet known).
+        4. Evaluate fitness via one episode per candidate.
+        5. Tell the active block's CMA-ES the fitness scores.
+        6. Move to the next block. Continue cycling until budget exhausted.
         """
         if callback is not None:
             callback.on_training_start()
 
+        active_idx = 0  # round-robin pointer
+
         while self.global_steps < total_timesteps:
 
-            # Step 1: ask each block's CMA-ES for its population.
-            # all_solutions[b] = list of popsize candidate vectors for block b
-            all_solutions = [es.ask() for es in self.es_list]
-            popsize       = min(len(sols) for sols in all_solutions)
+            # Step 1 & 2: active block asks for its population.
+            active_es        = self.es_list[active_idx]
+            active_solutions = active_es.ask()
+            popsize          = len(active_solutions)
 
             losses = []
 
-            # Step 2 & 3: assemble full network candidate-by-candidate and evaluate.
+            # Snapshot the inactive blocks: use best-known if available, else distribution mean.
+            if self.best_blocks is not None:
+                inactive_blocks = [np.array(blk) for blk in self.best_blocks]
+            else:
+                inactive_blocks = [np.array(self.es_list[b].mean) for b in range(self.n_blocks)]
+
+            # Step 3 & 4: assemble full network candidate-by-candidate and evaluate.
             for i in range(popsize):
                 if self.global_steps >= total_timesteps:
                     break
 
-                # Assemble one full set of blocks from candidate i of each block's population.
-                blocks = [all_solutions[b][i] for b in range(self.n_blocks)]
+                # Build the full block list: active block uses candidate i, others use best/mean.
+                blocks             = list(inactive_blocks)
+                blocks[active_idx] = active_solutions[i]
 
                 score = self._episode(blocks, callback=callback)
                 losses.append(-score)  # CMA-ES minimises — negate reward
@@ -127,14 +141,12 @@ class FullBlockwiseCMAnn:
                     self.best_score  = score
                     self.best_blocks = [np.array(blk) for blk in blocks]
 
-            if len(losses) == 0:
-                break
+            # Step 5: tell the active block's CMA-ES the losses (only if full generation evaluated).
+            if len(losses) == popsize:
+                active_es.tell(active_solutions, losses)
 
-            # Step 4: tell the same losses to every block's CMA-ES.
-            for b, es in enumerate(self.es_list):
-                sols_b = all_solutions[b][:len(losses)]
-                if len(losses) == popsize: # # only tell if full generation was evaluated
-                    es.tell(sols_b, losses)
+            # Step 6: advance round-robin pointer.
+            active_idx = (active_idx + 1) % self.n_blocks
 
         # Load best found blocks into the network.
         if self.best_blocks is not None:

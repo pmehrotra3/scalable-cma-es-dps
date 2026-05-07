@@ -3,9 +3,6 @@
 // Supports arbitrary depth and width, tanh activations for hidden layers and linear output layer,
 // and flat parameter vectors for use with black-box optimisers (e.g. CMA-ES).
 //
-// Memory-optimised: all forward-pass buffers are pre-allocated at construction time,
-// eliminating per-step heap allocations to reduce Python/C++ memory fragmentation.
-//
 // Developed with assistance from:
 //   Claude  (Anthropic)  — https://www.anthropic.com
 //   ChatGPT (OpenAI)     — https://openai.com
@@ -48,16 +45,16 @@ class neuron {
         bool                use_tanh; // if true, applies tanh activation; if false, output is linear
 
         // Constructor — stores the neuron's bias and weight vector.
-        neuron(double bias, std::vector<double> weights, bool use_tanh=true){
+        neuron(double bias, std::vector<double> weights, bool use_tanh=true) {
             this->bias    = bias;
             this->weights = weights;
-            this->use_tanh = use_tanh; 
+            this->use_tanh = use_tanh;
         }
 
-        // Computes: activation( dot(inputs, weights) + bias )
+        // Computes: tanh( dot(inputs, weights) + bias )
         double forward(const std::vector<double>& inputs) {
             double z = dot_product(inputs, this->weights) + this->bias;
-            return use_tanh ? tanh_activation(z): z;
+            return use_tanh ? tanh_activation(z) : z;
         }
 };
 
@@ -74,7 +71,7 @@ class layer {
 
         // Constructs a layer of `size` neurons, each expecting `input_layer_dim` inputs.
         // All weights and biases initialised to 0.0 — CMA-ES sets them before any forward pass.
-        layer(int size, int input_layer_dim, bool use_tanh=true) {
+        layer(int size, int input_layer_dim, bool use_tanh = true) {
             for (int i = 0; i < size; i++) {
                 double              bias = 0.0;
                 std::vector<double> weights(input_layer_dim, 0.0);
@@ -82,15 +79,7 @@ class layer {
             }
         }
 
-        // Runs each neuron's forward pass and writes into a pre-allocated output buffer.
-        // Zero heap allocations — output vector must be pre-sized to neurons.size().
-        void forward_into(const std::vector<double>& inputs, std::vector<double>& out) {
-            for (size_t i = 0; i < neurons.size(); i++) {
-                out[i] = neurons[i].forward(inputs);
-            }
-        }
-
-        // Original allocating version — kept for backward compatibility.
+        // Runs each neuron's forward pass and returns the layer's output vector.
         std::vector<double> forward(const std::vector<double>& inputs) {
             std::vector<double> outputs;
             for (neuron& n : this->neurons) {
@@ -107,83 +96,108 @@ class layer {
 
 class neural_network {
 
-    private:
-
-        // Pre-allocated buffers for each layer's output — avoids heap allocation on every forward pass.
-        std::vector<std::vector<double>> buffers;
-
     public:
 
         std::vector<layer> layers;  // hidden layers followed by output layer
+        int                block_size;  // number of neurons per block for block-diagonal CMA-ES
 
         // Constructs a fully-connected network:
         //   input_size          → dimension of the observation vector
         //   hidden_layer_sizes  → e.g. {64, 64} for two hidden layers of 64 neurons each
         //   output_size         → dimension of the action vector
+        //   block_size          → number of neurons per block when partitioning each layer;
+        //                         except possibly the last block of each layer, which holds
+        //                         the remaining neurons if the layer size is not exactly divisible by block_size
         //
         // All weights are initialised to 0.0 — use set_param() to load CMA-ES solutions.
-        // Forward-pass buffers are pre-allocated here to eliminate per-step allocations.
-        neural_network(int input_size, const std::vector<int>& hidden_layer_sizes, int output_size) {
-            int prev_size = input_size;
+        neural_network(int input_size, const std::vector<int>& hidden_layer_sizes, int output_size, int block_size) {
+            this->block_size = block_size;
+            int prev_size    = input_size;
 
             // Hidden layers.
             for (int size : hidden_layer_sizes) {
                 layers.push_back(layer(size, prev_size));
-                buffers.push_back(std::vector<double>(size));
                 prev_size = size;
             }
 
             // Output layer — linear (no activation), raw action values passed directly
             // to the environment, which clips them to the action space bounds.
             layers.push_back(layer(output_size, prev_size, false));
-            buffers.push_back(std::vector<double>(output_size));
         }
 
-        // Flattens all parameters (bias then weights, neuron by neuron, layer by layer)
-        // into a single vector — the format expected by CMA-ES.
-        std::vector<double> get_param() {
-            std::vector<double> params;
+        // Partitions parameters into blocks, layer by layer.
+        // For each layer, neurons are grouped into blocks of block_size.
+        // Each block contains the bias + weights of up to block_size neurons from that layer only —
+        // neurons from different layers are never mixed in the same block.
+        // The last block of each layer holds the remainder neurons if the layer size is not
+        // divisible by block_size.
+        // // Returns a vector of vectors where each inner vector is a block of parameters.
+        std::vector<std::vector<double>> get_param() {
+            std::vector<std::vector<double>> blocks;
+
             for (layer& l : this->layers) {
-                for (neuron& n : l.neurons) {
-                    params.push_back(n.bias);
-                    for (double w : n.weights) {
-                        params.push_back(w);
+                size_t num_neurons = l.neurons.size();
+                size_t i           = 0;
+
+                // Step through this layer's neurons in chunks of block_size.
+                while (i < num_neurons) {
+                    size_t end = std::min(i + (size_t)this->block_size, num_neurons);  // last block may be smaller
+
+                    // Collect bias + weights for neurons i .. end-1 into one block.
+                    std::vector<double> block;
+                    for (size_t j = i; j < end; j++) {
+                        block.push_back(l.neurons[j].bias);
+                        for (double w : l.neurons[j].weights) {
+                            block.push_back(w);
+                        }
                     }
+                    blocks.push_back(block);
+                    i = end;
                 }
             }
-            return params;
+
+            return blocks;
         }
 
-        // Loads a flat parameter vector (produced by CMA-ES) back into the network.
+        // Takes a vector of blocks, flattens them back into a single parameter vector,
+        // then loads the parameters into the network.
         // Order must match get_param(): bias then weights, neuron by neuron, layer by layer.
-        void set_param(const std::vector<double>& new_params) {
+        void set_param(const std::vector<std::vector<double>>& blocks) {
+
+            // Step 1: flatten blocks back into a single vector.
+            std::vector<double> flat;
+            for (const std::vector<double>& block : blocks) {
+                for (double val : block) {
+                    flat.push_back(val);
+                }
+            }
+
+            // Step 2: load flat vector into network.
             size_t index = 0;
             for (layer& l : this->layers) {
                 for (neuron& n : l.neurons) {
-                    if (index >= new_params.size()) {
+                    if (index >= flat.size()) {
                         throw std::out_of_range("Not enough parameters provided to set_param.");
                     }
-                    n.bias = new_params[index++];
+                    n.bias = flat[index++];            // post-increment: reads index, then increments
                     for (size_t w = 0; w < n.weights.size(); w++) {
-                        if (index >= new_params.size()) {
+                        if (index >= flat.size()) {
                             throw std::out_of_range("Not enough parameters provided to set_param.");
                         }
-                        n.weights[w] = new_params[index++];
+                        n.weights[w] = flat[index++];  // post-increment: reads index, then increments
                     }
                 }
             }
         }
 
         // Runs the full forward pass through all layers sequentially.
-        // Zero-allocation: uses pre-allocated buffers instead of creating new vectors.
         // Input: observation vector of length input_size.
-        // Output: reference to action vector of length output_size (valid until next forward call).
-        const std::vector<double>& forward(const std::vector<double>& inputs) {
-            const std::vector<double>* current = &inputs;
-            for (size_t i = 0; i < layers.size(); i++) {
-                layers[i].forward_into(*current, buffers[i]);
-                current = &buffers[i];
+        // Output: action vector of length output_size, each element unbounded (linear output layer).
+        std::vector<double> forward(const std::vector<double>& inputs) {
+            std::vector<double> current = inputs;
+            for (layer& l : this->layers) {
+                current = l.forward(current);
             }
-            return *current;
+            return current;
         }
 };

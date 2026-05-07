@@ -1,5 +1,5 @@
-# intra_layer_blockwise_cma_direct_policy_search.py
-# CMA-ES optimisers over the full parameter vector of a C++ neural network.
+# simultaneous_blockwise_cma_direct_policy_search.py
+# CMA-ES optimiser over the full parameter vector of a C++ neural network.
 # One CMA-ES instance per block — each block covers a contiguous group of neurons within a layer.
 # All blocks are asked for candidates, the full network is assembled and evaluated,
 # and the same fitness score is told to every block's CMA-ES instance.
@@ -19,12 +19,12 @@ BLOCK_SIZE    = 1         # Default number of neurons per block
 
 
 # =============================================================================
-# intra_layer_blockwise_cma_direct_policy_search
+# simultaneous_blockwise_cma_direct_policy_search
 # =============================================================================
 
-class intra_layer_blockwise_cma_direct_policy_search:
+class simultaneous_blockwise_cma_direct_policy_search:
     """
-    CMA-ES optimisers over the full parameter vector of a C++ neural network.
+    CMA-ES optimiser over the full parameter vector of a C++ neural network.
     The parameter vector is partitioned into blocks (groups of neurons within each layer).
     Each block has its own CMA-ES instance with its own covariance matrix.
     All blocks are asked for a population of candidates each generation.
@@ -53,7 +53,6 @@ class intra_layer_blockwise_cma_direct_policy_search:
         opts = {
             "CMA_diagonal": 0,
             "verbose":      -9,
-            "popsize_factor": 0.5
         }
         self.es_list = [cma.CMAEvolutionStrategy(block, SIGMA, opts)for block in init_blocks]
 
