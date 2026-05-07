@@ -1,7 +1,7 @@
 # Scalable CMA-ES Variants for Direct Neural Policy Optimization in Reinforcement Learning
 
 **Pranav Mehrotra** — Honors Thesis, University of Wisconsin–Madison, 2026
-Advisor: Assistant Professor Josiah P. Hanna
+**Advisor:** Assistant Professor Josiah P. Hanna
 
 📄 [Thesis](THESIS_LINK_HERE)
 
