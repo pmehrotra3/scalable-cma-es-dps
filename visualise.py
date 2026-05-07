@@ -2,11 +2,10 @@
 # Scans output/ for experiment results and generates per-environment:
 #   - plot_reward_vs_timestep.pdf  : moving-average reward vs global timestep
 #   - plot_reward_vs_episode.pdf   : moving-average reward vs episode number
-#   - summary_table.png            : per-algorithm performance summary as a table image
+#   - summary_table.pdf            : per-algorithm performance summary as a table
 #
-# Algorithms listed in EXCLUDED_RUNS (e.g. could not complete training due to a non-zero
-# exit return code) are marked with a cross (✗) in the summary table and excluded from
-# the plots.
+# Algorithms listed in EXCLUDED_ALGOS are marked with a cross (✗) in the summary table
+# and excluded from the plots, in any environment where they appear.
 #
 # Usage: python visualise.py [--output-dir PATH] [--moving-avg-window N]
 #
@@ -39,11 +38,11 @@ GRID_POINTS = 1000
 # Cross symbol used in the table for excluded algorithm cells.
 CROSS = "✗"
 
-# (env_name, algo_name) → reason. Algorithms in this dict are recorded as excluded:
-# they appear in the summary table with a row of crosses (✗) and are skipped in the plots.
+# algo_name → reason. If an algorithm folder with this name appears in ANY environment,
+# it is marked with a cross (✗) in the summary table and skipped in the plots.
 # Match the algorithm folder name exactly as it appears in output/<env>/.
-EXCLUDED_RUNS = {
-    ("Humanoid-v5", "cma_direct_policy_search"): "Could not complete training due to a non-zero exit return code",
+EXCLUDED_ALGOS = {
+    "cma_direct_policy_search": "Could not complete training due to a non-zero exit return code",
 }
 
 
@@ -95,10 +94,10 @@ def load_all_runs(algo_dir):
     if not episode_files:
         return None, None, None, None, None, 0
 
-    all_timesteps = []   # per-run timestep arrays
-    all_episodes  = []   # per-run episode arrays
-    all_rewards   = []   # per-run reward arrays
-    all_sys       = {"wall_time_s": [], "cpu_time_s": [], "ram_mb": [], "cpu_pct": []}
+    all_timesteps  = []
+    all_episodes   = []
+    all_rewards    = []
+    all_sys        = {"wall_time_s": [], "cpu_time_s": [], "ram_mb": [], "cpu_pct": []}
     valid_sys_runs = 0
 
     for ep_file in episode_files:
@@ -123,16 +122,15 @@ def load_all_runs(algo_dir):
         return None, None, None, None, None, 0
 
     # --- Timestep plot: interpolate each run onto a common grid ---
-    # Grid spans from 0 to the minimum final timestep across runs (safe common range).
-    max_common_ts = min(ts[-1] for ts in all_timesteps)
-    grid_ts       = np.linspace(0, max_common_ts, GRID_POINTS)
+    max_common_ts  = min(ts[-1] for ts in all_timesteps)
+    grid_ts        = np.linspace(0, max_common_ts, GRID_POINTS)
     interp_rewards = [np.interp(grid_ts, ts, rew) for ts, rew in zip(all_timesteps, all_rewards)]
     avg_rewards_ts = np.mean(interp_rewards, axis=0)
 
     # --- Episode plot: truncate all runs to shortest episode count ---
     min_ep_len     = min(len(r) for r in all_rewards)
     avg_rewards_ep = np.mean([r[:min_ep_len] for r in all_rewards], axis=0)
-    avg_episodes   = all_episodes[0][:min_ep_len]  # episode indices are the same across runs
+    avg_episodes   = all_episodes[0][:min_ep_len]
 
     # --- System metrics: truncate to shortest and average ---
     avg_sys = None
@@ -186,14 +184,17 @@ def save_fig(fig, ax, path):
     plt.close(fig)
 
 
-def save_table_as_png(rows, headers, num_runs, path, has_excluded=False):
+def save_table_as_pdf(rows, headers, num_runs, path, has_excluded=False):
     """
-    Renders a list of rows + headers as a clean styled table PNG using dataframe_image.
-    Includes a caption noting how many runs were averaged.
-    Cells containing the cross symbol stay as-is (not formatted as floats).
+    Renders a list of rows + headers as a clean styled table PDF.
+    Exports via dataframe_image (headless Chrome) to PNG first,
+    then converts PNG to PDF via img2pdf — lossless, pixel-perfect,
+    preserving exact colours and layout of the headless Chrome render.
     """
     import pandas as pd
     import dataframe_image as dfi
+    import img2pdf
+    from PIL import Image
 
     df = pd.DataFrame(rows, columns=headers)
 
@@ -232,7 +233,20 @@ def save_table_as_png(rows, headers, num_runs, path, has_excluded=False):
         for i in range(len(x))
     ], axis=0).hide(axis="index")
 
-    dfi.export(styled, path, dpi=180)
+    # Step 1: render to PNG via headless Chrome — preserves all CSS styling exactly.
+    tmp_png = path.replace(".pdf", "_tmp.png")
+    dfi.export(styled, tmp_png, dpi=180)
+
+    # Step 2: convert PNG to PDF via img2pdf — lossless, pixel-perfect.
+    img = Image.open(tmp_png).convert("RGB")
+    tmp_rgb = path.replace(".pdf", "_tmp_rgb.png")
+    img.save(tmp_rgb)
+    with open(path, "wb") as f:
+        f.write(img2pdf.convert(tmp_rgb))
+
+    # Step 3: clean up temporary files.
+    os.remove(tmp_png)
+    os.remove(tmp_rgb)
 
 
 # -----------------------------------------------------------------------------
@@ -240,16 +254,16 @@ def save_table_as_png(rows, headers, num_runs, path, has_excluded=False):
 # -----------------------------------------------------------------------------
 
 def process_environment(env_dir, env_name, window):
-    """Generates two plots and a summary table PNG for one environment."""
+    """Generates two plots and a summary table PDF for one environment."""
 
     # All algorithm folders that exist on disk for this env.
     on_disk_algos = sorted([d for d in os.listdir(env_dir) if os.path.isdir(os.path.join(env_dir, d))])
 
-    # Excluded algorithms registered for this env (may or may not exist on disk).
-    excluded_for_env = [a for (e, a) in EXCLUDED_RUNS if e == env_name]
+    # Excluded algorithms that actually appear on disk for this env.
+    excluded_for_env = [a for a in EXCLUDED_ALGOS if a in on_disk_algos]
 
-    # Combined list — disk + excluded — without duplicates, in stable sorted order.
-    algo_names = sorted(set(on_disk_algos) | set(excluded_for_env))
+    # Combined list — disk algos only (excluded ones are already in on_disk_algos).
+    algo_names = sorted(set(on_disk_algos))
 
     if not algo_names:
         print(f"  No algorithm folders found, skipping.")
@@ -262,11 +276,11 @@ def process_environment(env_dir, env_name, window):
     for idx, algo in enumerate(algo_names):
 
         # Excluded — record without loading anything.
-        if (env_name, algo) in EXCLUDED_RUNS:
-            print(f"    {algo}: marked as EXCLUDED — {EXCLUDED_RUNS[(env_name, algo)]}")
+        if algo in EXCLUDED_ALGOS:
+            print(f"    {algo}: marked as EXCLUDED — {EXCLUDED_ALGOS[algo]}")
             algo_data[algo] = {
                 "excluded": True,
-                "reason":   EXCLUDED_RUNS[(env_name, algo)],
+                "reason":   EXCLUDED_ALGOS[algo],
                 "num_runs": 0,
                 "colour":   COLOURS[idx % len(COLOURS)],
             }
@@ -308,7 +322,7 @@ def process_environment(env_dir, env_name, window):
     filtered_data = {}
     for algo, d in algo_data.items():
         if d.get("excluded", False):
-            filtered_data[algo] = d  # keep excluded entries unchanged
+            filtered_data[algo] = d
             continue
         if d["num_runs"] < reference_runs:
             print(f"    Skipping {algo} — only {d['num_runs']} run(s), need {reference_runs}.")
@@ -330,7 +344,7 @@ def process_environment(env_dir, env_name, window):
     format_xaxis_thousands(ax)
     for algo, d in algo_data.items():
         if d.get("excluded", False):
-            continue  # don't plot excluded algos
+            continue
         ma = moving_average(d["avg_rew_ts"], window)
         if ma is None:
             continue
@@ -342,7 +356,7 @@ def process_environment(env_dir, env_name, window):
     fig, ax = make_fig(title, xlabel="Episode", ylabel=f"Reward ({window}-ep moving average)")
     for algo, d in algo_data.items():
         if d.get("excluded", False):
-            continue  # don't plot excluded algos
+            continue
         ma = moving_average(d["avg_rew_ep"], window)
         if ma is None:
             continue
@@ -350,14 +364,13 @@ def process_environment(env_dir, env_name, window):
     save_fig(fig, ax, os.path.join(env_dir, "plot_reward_vs_episode.pdf"))
     print(f"    Saved: plot_reward_vs_episode.pdf")
 
-    # --- Summary table PNG ---
+    # --- Summary table PDF ---
     headers = ["Algorithm", "Avg Reward", "Best Reward", "Avg CPU %",
                "Total CPU Time (s)", "Total Wall Time (s)", "Avg RAM (MB)"]
     rows = []
     has_excluded = False
     for algo, d in algo_data.items():
         if d.get("excluded", False):
-            # Render entire row as crosses except the algorithm name.
             rows.append([algo, CROSS, CROSS, CROSS, CROSS, CROSS, CROSS])
             has_excluded = True
             continue
@@ -376,10 +389,10 @@ def process_environment(env_dir, env_name, window):
         rows.append([algo, avg_reward, best_reward, avg_cpu_pct,
                      total_cpu_time_s, total_wall_time_s, avg_ram_mb])
 
-    save_table_as_png(rows, headers, max_runs,
-                      os.path.join(env_dir, "summary_table.png"),
+    save_table_as_pdf(rows, headers, max_runs,
+                      os.path.join(env_dir, "summary_table.pdf"),
                       has_excluded=has_excluded)
-    print(f"    Saved: summary_table.png")
+    print(f"    Saved: summary_table.pdf")
 
 
 # -----------------------------------------------------------------------------

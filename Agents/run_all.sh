@@ -2,13 +2,20 @@
 ########################################
 # run_all.sh
 # Launches all training runs across all environments and all agents.
-# Phase 1: All non-Humanoid environments associated jobs,  MAX_PARALLEL=4   (runs first)
-# Phase 2: Humanoid-v5 jobs,                               MAX_PARALLEL=1   (runs last)
-# Prints a message when each job starts and when each job completes.
 #
-# Within each environment block, SB3 baselines run first; CMA-ES variants run last in the order:
-# sep, simultaneous (block_size=4, 32), sequential (block_size=4, 32), full CMA-ES.
-# Full CMA-ES is placed last because it has the highest memory and compute cost.
+# Execution order:
+#   1. run_cma  — all CMA-ES variants across all environments (completes fully first)
+#   2. run_sb3  — all SB3 baselines across all environments (runs after CMA-ES)
+#
+# Within each function:
+#   Phase 1: All non-Humanoid environments, MAX_PARALLEL=4
+#   Phase 2: Humanoid-v5,                   MAX_PARALLEL=1
+#
+# Environment ordering within each phase: Ant-v5, HalfCheetah-v5, Walker2d-v5,
+#   BipedalWalkerHardcore-v3 (Phase 1) and Humanoid-v5 (Phase 2).
+#
+# CMA-ES variant ordering: sep, simultaneous (block_size=4, 32),
+#   sequential (block_size=4, 32), full CMA-ES (last — highest memory cost).
 #
 # Blockwise variants run with two block sizes (--block-size 4 and 32) for sensitivity analysis.
 #
@@ -23,6 +30,7 @@ declare -a PIDS=()
 declare -a CMDS=()
 
 COMPLETED=0
+GRAND_TOTAL=0
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
@@ -54,121 +62,162 @@ reap_finished() {
   CMDS=("${new_cmds[@]}")
 }
 
-# ── job queues ───────────────────────────────────────────────────────────────
-COMMANDS_1=(
-  # ANT-v5
-  #"python3 train_a2c.py Ant-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_ppo.py Ant-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_sac.py Ant-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_ddpg.py Ant-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_td3.py Ant-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_tqc.py Ant-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_trpo.py Ant-v5 --total-timesteps 1000000 --num-runs 5"
-  #"(cd train_sep_cma_direct_policy_search && python3 train_sep_cma_direct_policy_search.py Ant-v5 --total-timesteps 1000000 --num-runs 5)"
-  #"(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py Ant-v5 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
-  #"(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py Ant-v5 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
-  #"(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py Ant-v5 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
-  #"(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py Ant-v5 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
-  #"(cd train_cma_direct_policy_search && python3 train_cma_direct_policy_search.py Ant-v5 --total-timesteps 1000000 --num-runs 5)"
+# ── helper: run a phase of commands with a parallelism limit ─────────────────
+run_phase() {
+  local PHASE_NAME="$1"
+  local MAX_PARALLEL="$2"
+  shift 2
+  local COMMANDS=("$@")
+  local TOTAL=${#COMMANDS[@]}
+  local NEXT=0
 
-  # HALFCHEETAH-v5
-  #"python3 train_a2c.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_ppo.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_sac.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_ddpg.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_td3.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_tqc.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_trpo.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5"
-  #"(cd train_sep_cma_direct_policy_search && python3 train_sep_cma_direct_policy_search.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5)"
-  #"(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
-  #"(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
-  #"(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
-  #"(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
-  #"(cd train_cma_direct_policy_search && python3 train_cma_direct_policy_search.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5)"
-
-  # WALKER2D-v5
-  #"python3 train_a2c.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_ppo.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_sac.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_ddpg.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_td3.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_tqc.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_trpo.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5"
-  #"(cd train_sep_cma_direct_policy_search && python3 train_sep_cma_direct_policy_search.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5)"
-  #"(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
-  #"(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
-  #"(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
-  #"(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
-  #"(cd train_cma_direct_policy_search && python3 train_cma_direct_policy_search.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5)"
-
-  # BIPEDALWALKERHARDCORE-v3
-  #"python3 train_a2c.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_ppo.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_sac.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_ddpg.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_td3.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_tqc.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_trpo.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5"
-  #"(cd train_sep_cma_direct_policy_search && python3 train_sep_cma_direct_policy_search.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5)"
-  #"(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
-  #"(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
-  #"(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
-  #"(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
-  #"(cd train_cma_direct_policy_search && python3 train_cma_direct_policy_search.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5)"
-)
-
-COMMANDS_2=(
-  # HUMANOID-v5
-  #"python3 train_a2c.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_ppo.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_sac.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_ddpg.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_td3.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_tqc.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5"
-  #"python3 train_trpo.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5"
-  "(cd train_sep_cma_direct_policy_search && python3 train_sep_cma_direct_policy_search.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5)"
-  "(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
-  "(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
-  "(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
-  "(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
-  "(cd train_cma_direct_policy_search && python3 train_cma_direct_policy_search.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5)"
-)
-
-GRAND_TOTAL=$(( ${#COMMANDS_1[@]} + ${#COMMANDS_2[@]} ))
-log "Starting run_all.sh — $GRAND_TOTAL jobs total (Phase 1: ${#COMMANDS_1[@]} x MAX_PARALLEL=4, Phase 2: ${#COMMANDS_2[@]} x MAX_PARALLEL=1)."
-
-# ── main loop ────────────────────────────────────────────────────────────────
-for PHASE in 1 2; do
-  if [ $PHASE -eq 1 ]; then
-    COMMANDS=("${COMMANDS_1[@]}"); MAX_PARALLEL=4
-  else
-    COMMANDS=("${COMMANDS_2[@]}"); MAX_PARALLEL=1
-  fi
-
-  TOTAL=${#COMMANDS[@]}
-  NEXT=0
-  log "▶ Starting Phase $PHASE — $TOTAL jobs, max $MAX_PARALLEL concurrent."
+  log "▶ Starting $PHASE_NAME — $TOTAL jobs, max $MAX_PARALLEL concurrent."
 
   while [ $NEXT -lt $TOTAL ] || [ ${#PIDS[@]} -gt 0 ]; do
-
-    # Launch jobs until the slot is full or the queue is empty
     while [ ${#PIDS[@]} -lt $MAX_PARALLEL ] && [ $NEXT -lt $TOTAL ]; do
       CMD="${COMMANDS[$NEXT]}"
       NEXT=$((NEXT + 1))
-
       bash -c "$CMD" &
       PID=$!
       PIDS+=("$PID")
       CMDS+=("$CMD")
-      log "🚀 STARTED  (job $NEXT/$TOTAL in phase $PHASE) [PID $PID]: $CMD"
+      log "🚀 STARTED  (job $NEXT/$TOTAL in $PHASE_NAME) [PID $PID]: $CMD"
     done
-
-    # Wait a moment then reap any completed jobs
     sleep 5
     reap_finished
-
   done
-  log "✔ Phase $PHASE complete."
-done
 
+  log "✔ $PHASE_NAME complete."
+}
+
+# =============================================================================
+# CMA-ES experiments
+# =============================================================================
+
+run_cma() {
+  log "════════════════════════════════════════"
+  log "  CMA-ES EXPERIMENTS"
+  log "════════════════════════════════════════"
+
+  # ── Phase 1: non-Humanoid environments, MAX_PARALLEL=4 ───────────────────
+  local CMA_PHASE1=(
+    # ANT-v5
+    "(cd train_sep_cma_direct_policy_search && python3 train_sep_cma_direct_policy_search.py Ant-v5 --total-timesteps 1000000 --num-runs 5)"
+    "(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py Ant-v5 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
+    "(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py Ant-v5 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
+    "(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py Ant-v5 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
+    "(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py Ant-v5 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
+    "(cd train_cma_direct_policy_search && python3 train_cma_direct_policy_search.py Ant-v5 --total-timesteps 1000000 --num-runs 5)"
+
+    # HALFCHEETAH-v5
+    "(cd train_sep_cma_direct_policy_search && python3 train_sep_cma_direct_policy_search.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5)"
+    "(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
+    "(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
+    "(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
+    "(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
+    "(cd train_cma_direct_policy_search && python3 train_cma_direct_policy_search.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5)"
+
+    # WALKER2D-v5
+    "(cd train_sep_cma_direct_policy_search && python3 train_sep_cma_direct_policy_search.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5)"
+    "(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
+    "(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
+    "(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
+    "(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
+    "(cd train_cma_direct_policy_search && python3 train_cma_direct_policy_search.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5)"
+
+    # BIPEDALWALKERHARDCORE-v3
+    "(cd train_sep_cma_direct_policy_search && python3 train_sep_cma_direct_policy_search.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5)"
+    "(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
+    "(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
+    "(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
+    "(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
+    "(cd train_cma_direct_policy_search && python3 train_cma_direct_policy_search.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5)"
+  )
+
+  # ── Phase 2: Humanoid-v5, MAX_PARALLEL=1 ─────────────────────────────────
+  local CMA_PHASE2=(
+    "(cd train_sep_cma_direct_policy_search && python3 train_sep_cma_direct_policy_search.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5)"
+    "(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
+    "(cd train_simultaneous_blockwise_cma_direct_policy_search && python3 train_simultaneous_blockwise_cma_direct_policy_search.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
+    "(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5 --block-size 4)"
+    "(cd train_sequential_blockwise_cma_direct_policy_search && python3 train_sequential_blockwise_cma_direct_policy_search.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5 --block-size 32)"
+    "(cd train_cma_direct_policy_search && python3 train_cma_direct_policy_search.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5)"
+  )
+
+  GRAND_TOTAL=$(( GRAND_TOTAL + ${#CMA_PHASE1[@]} + ${#CMA_PHASE2[@]} ))
+  run_phase "CMA Phase 1 (non-Humanoid)" 4 "${CMA_PHASE1[@]}"
+  run_phase "CMA Phase 2 (Humanoid-v5)"  1 "${CMA_PHASE2[@]}"
+}
+
+# =============================================================================
+# SB3 experiments
+# =============================================================================
+
+run_sb3() {
+  log "════════════════════════════════════════"
+  log "  SB3 EXPERIMENTS"
+  log "════════════════════════════════════════"
+
+  # ── Phase 1: non-Humanoid environments, MAX_PARALLEL=4 ───────────────────
+  local SB3_PHASE1=(
+    # ANT-v5
+    "python3 train_a2c.py Ant-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_ppo.py Ant-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_sac.py Ant-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_ddpg.py Ant-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_td3.py Ant-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_tqc.py Ant-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_trpo.py Ant-v5 --total-timesteps 1000000 --num-runs 5"
+
+    # HALFCHEETAH-v5
+    "python3 train_a2c.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_ppo.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_sac.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_ddpg.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_td3.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_tqc.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_trpo.py HalfCheetah-v5 --total-timesteps 1000000 --num-runs 5"
+
+    # WALKER2D-v5
+    "python3 train_a2c.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_ppo.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_sac.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_ddpg.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_td3.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_tqc.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_trpo.py Walker2d-v5 --total-timesteps 1000000 --num-runs 5"
+
+    # BIPEDALWALKERHARDCORE-v3
+    "python3 train_a2c.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_ppo.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_sac.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_ddpg.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_td3.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_tqc.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_trpo.py BipedalWalkerHardcore-v3 --total-timesteps 1000000 --num-runs 5"
+  )
+
+  # ── Phase 2: Humanoid-v5, MAX_PARALLEL=1 ─────────────────────────────────
+  local SB3_PHASE2=(
+    "python3 train_a2c.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_ppo.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_sac.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_ddpg.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_td3.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_tqc.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5"
+    "python3 train_trpo.py Humanoid-v5 --total-timesteps 1000000 --num-runs 5"
+  )
+
+  GRAND_TOTAL=$(( GRAND_TOTAL + ${#SB3_PHASE1[@]} + ${#SB3_PHASE2[@]} ))
+  run_phase "SB3 Phase 1 (non-Humanoid)" 4 "${SB3_PHASE1[@]}"
+  run_phase "SB3 Phase 2 (Humanoid-v5)"  1 "${SB3_PHASE2[@]}"
+}
+
+# =============================================================================
+# Entry point — CMA-ES first, then SB3
+# =============================================================================
+
+log "Starting run_all.sh"
+run_cma
+run_sb3
 log "🏁 All $GRAND_TOTAL jobs completed."
