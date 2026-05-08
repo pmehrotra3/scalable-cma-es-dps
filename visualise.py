@@ -90,7 +90,7 @@ def load_all_runs(algo_dir):
 
     Returns (avg_timesteps, avg_episodes, avg_rewards_ts, avg_rewards_ep, avg_sys, num_runs).
     """
-    episode_files = sorted(glob.glob(os.path.join(algo_dir, "episode_log_run_*.csv")))
+    episode_files = sorted(glob.glob(os.path.join(glob.escape(algo_dir), "episode_log_run_*.csv")))
     if not episode_files:
         return None, None, None, None, None, 0
 
